@@ -1,0 +1,877 @@
+<header class="top wrap">
+  <div class="kicker">
+    <span class="label"><span class="bits"><i></i><i class="z"></i><i></i><i></i><i class="z"></i><i class="z"></i><i></i><i class="z"></i></span> Paper walkthrough</span>
+    <span class="label">Minixhofer et al. · Nature · 2026</span>
+  </div>
+  <h1>Bolmo, byte by byte</h1>
+  <p class="lede">Language models don't read letters. They read tokens, chunks of text picked from a fixed vocabulary. <em>Retrofitting language models to operate over bytes</em> takes a finished token-based model, Olmo 3, and rebuilds it to read and write raw bytes. It keeps almost everything the model learned, for under 1% of the cost of training it.</p>
+  <div class="heads">
+    <div><b class="num">62.5 <span>vs</span> 62.3</b><span>Bolmo 7B vs Olmo 3 7B, average of 40 benchmarks</span></div>
+    <div><b class="num">78.1 <span>vs</span> 54.3</b><span>on character-level tasks such as spelling and letter counting</span></div>
+    <div><b class="num">&lt; 1%</b><span>of a typical pretraining budget: 49.1B tokens of extra training</span></div>
+  </div>
+</header>
+
+<div class="inbar">
+  <div class="wrap">
+    <label class="field" for="txt"><span class="label">Text</span><input id="txt" type="text" maxlength="140" spellcheck="false" autocomplete="off" value="Bees hum among the flowerbeds. Hello World!"></label>
+    <div class="chips" id="presets" aria-label="Example texts"></div>
+    <div class="stats" aria-live="polite">
+      <div class="stat"><b id="sN">0</b><span>bytes</span></div>
+      <div class="stat"><b id="sK">0</b><span>patches</span></div>
+      <div class="stat"><b id="sC">0</b><span>bytes per patch</span></div>
+    </div>
+  </div>
+</div>
+
+<main>
+<section class="first wrap" id="context">
+  <div class="sec-head">
+    <span class="label">Context · why this paper exists</span>
+    <h2>Tokens hide the letters</h2>
+  </div>
+  <div class="ctx">
+    <div class="story">
+      <div><span class="label">The problem</span><p>Nearly every large language model reads <b>subword tokens</b>: chunks like <span class="tok">␣flower</span> or <span class="tok">bed</span>, each turned into one ID number. The letters inside a token never reach the model. That hurts tasks about spelling and counting, code, and sequences like DNA. It also makes the vocabulary favour English.</p></div>
+      <div><span class="label">The obvious fix</span><p>Read <b>raw bytes</b>, the 0–255 numbers every computer stores text as. Byte-level models exist, but each one was trained from scratch. They trail the best token models, which improve faster than anyone can afford to retrain a byte model to catch up.</p></div>
+      <div><span class="label">This paper's move</span><p>Start from a finished token model instead. Keep its transformer, where the knowledge is, and replace only the parts that touch tokens with small byte-level parts. The authors call this <b>byteification</b>. Olmo 3 7B becomes <b>Bolmo 7B</b>. The same recipe turns Qwen3 into Bwen and Llama 3 into Blama.</p></div>
+    </div>
+    <div class="lanes card" aria-live="polite">
+      <span class="label">Your text, three ways</span>
+      <div class="lane"><div class="lh"><span><b>As characters</b></span><span class="num" id="lcN"></span></div><div class="lt mono" id="lc"></div></div>
+      <div class="lane"><div class="lh"><span><b>As tokens</b>, what Olmo 3 reads</span><span class="num" id="ltN"></span></div><div class="toks" id="lt"></div></div>
+      <div class="lane"><div class="lh"><span><b>As bytes</b>, what Bolmo reads</span><span class="num" id="lbN"></span></div><div class="hexes" id="lb"></div></div>
+      <p class="insight" id="insight"></p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap" id="overview">
+  <div class="sec-head">
+    <span class="label">The architecture · paper Fig. 1</span>
+    <h2>Keep the transformer, swap the ends</h2>
+    <p>The top row is Olmo 3, an ordinary token model. The bottom row is Bolmo, its byteified version. The transformer in the middle holds nearly all of the 7 billion parameters and is carried over unchanged. Everything that touched tokens is replaced by small byte-level parts. <b>Click a Bolmo part to zoom in.</b></p>
+  </div>
+  <div class="flow" id="flow"></div>
+  <div class="flowkey">
+    <span><i class="sw" style="background:var(--kept)"></i>carried over from Olmo 3</span>
+    <span><i class="sw" style="background:var(--new)"></i>new, trained during byteification</span>
+    <span class="muted">Numbers update with your text.</span>
+  </div>
+
+  <div class="launch">
+    <button class="btn primary" type="button" data-open="2">Zoom into the Patcher, the key new part</button>
+    <button class="btn" type="button" data-full="1">Show all nine steps at once</button>
+  </div>
+</section>
+
+<section class="wrap" id="peek">
+  <div class="sec-head">
+    <span class="label">The key idea · one byte of future</span>
+    <h2>Subword tokenizers secretly look ahead</h2>
+    <p>A language model predicts the next token from past tokens only. But the tokenizer that made those tokens read the whole text first. Whether "W" ends a token depends on what comes after it. Earlier byte-level models placed boundaries from the past alone, so they could not copy a subword model's boundaries. Bolmo's boundary predictor gets to see one byte ahead.</p>
+  </div>
+  <div class="two">
+    <div>
+      <h3>Same prefix, different boundaries</h3>
+      <p class="muted" style="margin:4px 0 12px">Real tokenizer output. Red marks the token that ends inside the shared prefix in one text but not the other.</p>
+      <div class="pairs" id="pairs"></div>
+    </div>
+    <div>
+      <h3>How far ahead must you look?</h3>
+      <p class="muted" style="margin:4px 0 0">Run the tokenizer on your text cut off <i>k</i> bytes after each position, and compare its boundary with the boundary from the full text.</p>
+      <div class="ctrl">
+        <label for="kpeek">Lookahead <b class="num" id="kv">1</b> byte(s)</label>
+        <input id="kpeek" type="range" min="0" max="4" step="1" value="1">
+        <div class="meter"><b id="agree">0%</b><span class="muted">of boundaries match</span></div>
+      </div>
+      <div class="strip" id="peekstrip"></div>
+      <p class="note">With <i>k</i> = 0 every cut ends a token, so a model that sees only the past cannot tell. Cutting and re-running the tokenizer is a crude predictor. Bolmo learns its predictor from the representations of byte <i>t</i> and byte <i>t</i>+1, and gets above 99% with one byte.</p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap" id="decode">
+  <div class="sec-head">
+    <span class="label">Generation · fused vocabulary of 512</span>
+    <h2>Writing one byte at a time</h2>
+    <p>When generating, there is no future byte to peek at. So the language-modelling head predicts the next byte together with whether a patch ends after it: 256 bytes, plus 256 "byte then &lt;b&gt;" entries. The small local models run for every byte. When a fused entry comes out, the patch is complete and the global model runs once. This replays your text as if Bolmo were writing it.</p>
+  </div>
+  <div class="ctrl">
+    <button class="btn primary" id="play" type="button">Play</button>
+    <button class="btn" id="step" type="button">Step</button>
+    <button class="btn" id="reset" type="button">Reset</button>
+    <span class="log" id="declog"></span>
+  </div>
+  <div class="strip emit" id="emit"></div>
+  <div class="counters">
+    <div class="counter"><b id="cLocal">0</b><span>local model steps (one per byte)</span></div>
+    <div class="counter"><b id="cGlobal">0</b><span>global model calls (one per patch)</span></div>
+    <div class="counter"><b id="cSave">–</b><span>global calls saved vs. running it on every byte</span></div>
+  </div>
+  <div class="two">
+    <div>
+      <h3 style="margin-bottom:8px">The 512 outputs</h3>
+      <div class="dec-grid" id="grid512" aria-label="512 output entries"></div>
+      <p class="note">Top 8 rows: the 256 plain bytes. Bottom 8 rows, tinted: the same 256 bytes followed by a boundary. The lit cell is the entry emitted at this step.</p>
+    </div>
+    <div class="card">
+      <h3>Why fuse the boundary into the byte?</h3>
+      <p style="margin-top:6px">A separate &lt;b&gt; symbol would add <i>k</i> extra positions for the local decoder to process. Doubling the vocabulary from 256 to 512 avoids that. Sampling methods such as top-p work over all 512 entries unchanged. The only cost is a softmax over 512 entries instead of 256.</p>
+      <p style="margin-top:10px">Prefill is the other path. A prompt you hand the model is complete, so its boundaries come from the predictor that sees one byte ahead.</p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap" id="train">
+  <div class="sec-head">
+    <span class="label">Training · two stages · 49.1B tokens in total</span>
+    <h2>First copy the subword model, then let go</h2>
+    <p>Bolmo starts from Olmo 3 7B. The global model takes the subword model's transformer layers as they are. The new byte-level parts start from random initialization and are trained in two stages.</p>
+  </div>
+  <div class="stages seg" role="group" aria-label="Training stage">
+    <button type="button" id="st1" aria-pressed="true">Stage 1 · learn to imitate</button>
+    <button type="button" id="st2" aria-pressed="false">Stage 2 · train end to end</button>
+  </div>
+  <div class="two">
+    <div>
+      <div class="arch" id="arch"></div>
+      <div class="budget" aria-hidden="true"><i style="width:20%;background:var(--p3)"></i><i style="width:80%;background:var(--p1)"></i></div>
+      <p class="note" style="margin-top:0"><span class="num">9.8B</span> tokens (stage 1, 75K steps) + <span class="num">39.3B</span> tokens (stage 2, 150K steps), drawn from a 172B-token data mix.</p>
+    </div>
+    <div>
+      <div class="losses" id="losses"></div>
+      <p class="note" id="stagenote"></p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap" id="speed">
+  <div class="sec-head">
+    <span class="label">Efficiency · paper Fig. 2 and Extended Data Fig. 3</span>
+    <h2>Bigger patches, fewer global steps</h2>
+    <p>A subword model is tied to its vocabulary. A byte model can make its patches as long as it likes. Bolmo raises bytes per patch by merging subword boundaries away during stage 2. The paper's best merge rule works like BPE run on each example: join the most frequent adjacent pair until the target is reached.</p>
+  </div>
+  <div class="ctrl">
+    <label for="cmp">Target <b class="num" id="cmpv">4.0</b> bytes per patch</label>
+    <input id="cmp" type="range" min="1" max="12" step="0.5" value="4">
+    <span class="muted" id="cmpstat"></span>
+  </div>
+  <div class="strip" id="cmpstrip"></div>
+  <p class="note">Merging here works on your short text, joining the most frequent adjacent pair of patches (ties go to the shortest result). In the paper it supervises the boundary predictor during training.</p>
+  <div class="two" style="margin-top:24px">
+    <div>
+      <h3>Accuracy against compute, 1B models</h3>
+      <div class="keys" id="fig2keys"></div>
+      <div class="chartbox"><svg class="chart" id="fig2" viewBox="0 0 520 330" role="img" aria-label="Core task performance against GFLOPs per byte"></svg></div>
+      <p class="note">Values read off the paper's Fig. 2, so expect about ±0.5. <i>t</i> is the target bytes per patch, <i>c</i> the one reached. The subword route (SuperBPE vocabularies) stalls once its softmax gets expensive. Bolmo with BPE merges reaches lower cost at a smaller drop in accuracy.</p>
+    </div>
+    <div>
+      <h3>Decoding speed, 7B models on one H100</h3>
+      <div class="chartbox"><svg class="chart" id="fig3" viewBox="0 0 520 250" role="img" aria-label="Decoding throughput in bytes per second"></svg></div>
+      <p class="note">Greedy decoding, batch size 1. Values read off Extended Data Fig. 3a (roughly flat across prefill lengths from 4.5K to 72K bytes). At 4.4 bytes per patch, the same as Olmo's tokens, Bolmo is slower. Around 6.6 it overtakes Olmo, in decoding speed and in time to first byte.</p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap" id="results">
+  <div class="sec-head">
+    <span class="label">Results · paper Table 1</span>
+    <h2>Close to the source model, far ahead on characters</h2>
+    <p>Each byteified model is compared with the subword model it came from and with byte-level models trained from scratch. Byteifying keeps most of the source model's ability. On character-level tasks (spelling, counting letters, editing words) it jumps well past it.</p>
+  </div>
+  <div class="ctrl">
+    <div class="seg" role="group" aria-label="Model family" id="fam"></div>
+    <label style="display:inline-flex;gap:8px;align-items:center;font-size:14px"><input type="checkbox" id="showbl" checked> Byte-level models trained from scratch</label>
+  </div>
+  <div class="keys" id="reskeys"></div>
+  <div class="chartbox"><svg class="chart" id="res" viewBox="0 0 760 420" role="img" aria-label="Benchmark scores by category"></svg></div>
+  <p class="note">Scores in %. Code columns are pass@1 and pass@16. Bolmo was trained on 75M tokens of synthetic character-understanding data (0.04% of its data mix), and "Olmo 3 7B (CT)" is Olmo trained on the same mix with no architecture change. CT keeps 70.7 on Char, so most of the Char gain is the data. Bolmo's 78.1 adds a few points on top.</p>
+  <div class="two" style="margin-top:28px">
+    <div>
+      <h3>Borrowing post-training for free</h3>
+      <div class="chartbox" style="margin-top:8px"><svg class="chart" id="ife" viewBox="0 0 520 210" role="img" aria-label="IFEval scores"></svg></div>
+    </div>
+    <div class="card">
+      <h3>Task arithmetic, paper Fig. 3</h3>
+      <p style="margin-top:6px">Bolmo's global model is Olmo's transformer, so the weight change that post-training made to Olmo can be added directly: θ<sub>Bolmo</sub> + (θ<sub>IT</sub> − θ<sub>PT</sub>). With no extra training this lifts instruction following on IFEval by <b>36 points</b>, to about where the post-trained Olmo is.</p>
+      <p style="margin-top:10px" class="muted">It works when the post-trained model still runs well with its base model's embeddings put back. RL-trained checkpoints, like the one used here, usually do (Extended Data Fig. 2).</p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap" id="quiz">
+  <div class="sec-head">
+    <span class="label">Check yourself</span>
+    <h2>Five questions</h2>
+    <p>Answer before you look back. Each answer explains itself.</p>
+  </div>
+  <div class="quiz" id="quizbox"></div>
+</section>
+</main>
+
+<footer class="wrap">
+  <p>Source: B. Minixhofer, T. Murray, T. Limisiewicz, A. Korhonen, L. Zettlemoyer, N. A. Smith, E. M. Ponti, L. Soldaini &amp; V. Hofmann, “Retrofitting language models to operate over bytes”, <i>Nature</i> (2026), <a href="https://doi.org/10.1038/s41586-026-11111-4">doi:10.1038/s41586-026-11111-4</a>, CC BY 4.0. Code: <a href="https://github.com/allenai/bolmo-core">allenai/bolmo-core</a>. Tokenizer vocabulary: cl100k_base merge ranks from <a href="https://github.com/dqbd/tiktoken">js-tiktoken</a> (MIT), first 24,576 entries. Layout inspired by <a href="https://poloclub.github.io/transformer-explainer/">Transformer Explainer</a>. This page runs a tokenizer, not the model. Charted numbers come from the paper. Where a value was read off a figure, its caption says so.</p>
+</footer>
+
+<script>
+"use strict";
+const VOCAB_GZ = "__VOCAB_GZ_B64__";
+const PAT = new RegExp("('s|'S|'t|'T|'re|'rE|'Re|'RE|'ve|'vE|'Ve|'VE|'m|'M|'ll|'lL|'Ll|'LL|'d|'D)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+", "gu");
+const PRESETS = [
+  ["Flowerbeds", "Bees hum among the flowerbeds. Hello World!"],
+  ["Code", "def area(r): return 3.14159 * r ** 2"],
+  ["Strawberry", "How many r's are in strawberry?"],
+  ["German", "Größenordnung über München"],
+  ["DNA", "ATGGCGTACCTTAGGCTAA"],
+];
+const enc = new TextEncoder(), dec = new TextDecoder();
+const $ = (id) => document.getElementById(id);
+const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const PC = (j) => `var(--p${j === 0 ? 0 : 1 + ((j - 1) % 5)})`;
+let RANK = null, MAXLEN = 1;
+
+/* ---------- tokenizer: byte-level BPE, identical to tiktoken's on the embedded merges ---------- */
+async function loadVocab() {
+  const bin = Uint8Array.from(atob(VOCAB_GZ), (c) => c.charCodeAt(0));
+  const stream = new Blob([bin]).stream().pipeThrough(new DecompressionStream("gzip"));
+  const buf = new Uint8Array(await new Response(stream).arrayBuffer());
+  const m = new Map();
+  for (let i = 0, r = 0; i < buf.length; r++) {
+    const L = buf[i++];
+    let s = "";
+    for (let j = 0; j < L; j++) s += String.fromCharCode(buf[i + j]);
+    i += L; m.set(s, r); if (L > MAXLEN) MAXLEN = L;
+  }
+  RANK = m;
+}
+function bpe(bytes) {
+  let parts = Array.from(bytes, (b) => String.fromCharCode(b));
+  while (parts.length > 1) {
+    let best = Infinity, bi = -1;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const r = RANK.get(parts[i] + parts[i + 1]);
+      if (r !== undefined && r < best) { best = r; bi = i; }
+    }
+    if (bi < 0) break;
+    parts.splice(bi, 2, parts[bi] + parts[bi + 1]);
+  }
+  return parts;
+}
+// returns token spans over UTF-8 bytes: [{s, e, rank}]
+function tokenize(str) {
+  const out = []; let off = 0;
+  for (const m of str.matchAll(PAT)) {
+    off = enc.encode(str.slice(0, m.index)).length;
+    for (const p of bpe(enc.encode(m[0]))) { out.push({ s: off, e: off + p.length, rank: RANK.get(p) }); off += p.length; }
+  }
+  return out;
+}
+function show(bytes) { return dec.decode(bytes).replace(/ /g, "␣").replace(/\n/g, "↵"); }
+
+/* ---------- derived model state for the current text ---------- */
+let S = null;
+function analyse(text) {
+  const bytes = enc.encode(text), n = bytes.length;
+  const toks = tokenize(text);
+  const endB = new Uint8Array(n); toks.forEach((t) => (endB[t.e - 1] = 1));
+  // columns: 0 = <s>, c = byte c-1
+  const N = n + 1, bnd = new Uint8Array(N), patchOf = new Int32Array(N), recv = new Int32Array(N);
+  bnd[0] = 1; for (let i = 0; i < n; i++) bnd[i + 1] = endB[i];
+  let p = 0; for (let c = 0; c < N; c++) { patchOf[c] = p; if (bnd[c]) p++; }
+  const k = toks.length;
+  for (let c = 0; c < N; c++) recv[c] = bnd[c] ? patchOf[c] : patchOf[c] - 1;
+  // longest vocabulary token ending at each byte (the subword-suffix embedding)
+  const suf = [];
+  for (let i = 0; i < n; i++) {
+    let best = null;
+    for (let L = Math.min(MAXLEN, i + 1, 32); L >= 1; L--) {
+      let s = ""; for (let j = i - L + 1; j <= i; j++) s += String.fromCharCode(bytes[j]);
+      const r = RANK.get(s); if (r !== undefined) { best = { L, r, b: bytes.slice(i - L + 1, i + 1) }; break; }
+    }
+    suf.push(best);
+  }
+  // character starts, for display and for cutting prefixes cleanly
+  const lead = new Uint8Array(n); for (let i = 0; i < n; i++) lead[i] = (bytes[i] & 0xc0) !== 0x80 ? 1 : 0;
+  return { text, bytes, n, toks, k, N, bnd, patchOf, recv, suf, lead };
+}
+function glyph(S, i) {
+  const b = S.bytes[i];
+  if (b === 32) return { g: "␣", ws: true };
+  if (b < 32 || b === 127) return { g: b === 10 ? "↵" : "·", ws: true };
+  if (b < 128) return { g: String.fromCharCode(b) };
+  if (S.lead[i]) { let j = i + 1; while (j < S.n && !S.lead[j]) j++; return { g: dec.decode(S.bytes.slice(i, j)) }; }
+  return { g: "˙", ws: true };
+}
+const hex = (b) => b.toString(16).toUpperCase().padStart(2, "0");
+
+/* ---------- explorer ---------- */
+let sel = 25, stage = 0, comp = null, full = false;
+const STAGES = [
+  { id: "x", nm: "Bytes", sh: "x ∈ {0…255}ⁿ" },
+  { id: "e", nm: "Embedding 𝒯", sh: "e ∈ ℝ^(n×d)" },
+  { id: "enc", nm: "Local encoder ℰ", sh: "ê = ℰ(e)" },
+  { id: "b", nm: "Boundary predictor ℬ", sh: "p ∈ [0,1]ⁿ" },
+  { id: "pool", nm: "Pool", sh: "h ∈ ℝ^(k×d)" },
+  { id: "glob", nm: "Global model ℳ", sh: "ĥ = ℳ(h)" },
+  { id: "dep", nm: "Depool", sh: "z ∈ ℝ^(n×d)" },
+  { id: "decd", nm: "Local decoder 𝒟", sh: "ẑ = 𝒟(z)" },
+  { id: "head", nm: "LM head", sh: "y ∈ [0,1]^(n×512)" },
+];
+// the zoomable parts of the overview, each owning some of the nine steps
+const COMPS = [
+  { nm: "Bytes in", stages: [0, 1], what: "Turns text into vectors with no tokenizer", stat: () => `${S.n} bytes`,
+    intro: "Each character is stored as 1 to 4 bytes (UTF-8). Each byte is looked up in a 256-row table. Bolmo also adds the vector of the longest Olmo token that ends at that byte, which carries over what Olmo learned about words.", io: () => [`${[...S.text].length} characters`, `${S.n} byte vectors`] },
+  { nm: "Byte encoder", stages: [2], what: "Lets each byte see the bytes before it", stat: () => `1 layer · ${S.n} steps`,
+    intro: "One cheap recurrent layer runs along the bytes, so each byte's vector also describes what came before it. After it, the r in flower carries the information that it closes the word.", io: () => [`${S.n} byte vectors`, `${S.n} byte vectors, with context`] },
+  { nm: "Patcher", stages: [3, 4], what: "Groups bytes into patches, Bolmo's tokens", stat: () => `${S.k} patches · ${(S.n / Math.max(1, S.k)).toFixed(1)} bytes each`,
+    intro: "Patches play the role that tokens played for Olmo. A small predictor ends a patch wherever Olmo's tokenizer would end a token. To do that it peeks one byte ahead, the paper's key change. Then one vector per patch is kept.", io: () => [`${S.n} byte vectors`, `${S.k} patch vectors`] },
+  { nm: "Global transformer", stages: [5], what: "Olmo 3's transformer, run once per patch", stat: () => `runs ${S.k + 1} steps, as Olmo does`, kept: true,
+    intro: "This is Olmo 3's transformer, starting from Olmo's own weights. It sees one vector per patch. Since patches match Olmo's tokens, it runs the same number of steps Olmo would, so it can keep working the way it learned to.", io: () => [`${S.k} patch vectors`, `${S.k} patch vectors, contextualised`] },
+  { nm: "Byte decoder", stages: [6, 7], what: "Hands each patch's result back to its bytes", stat: () => `4 layers · ${S.n} steps`,
+    intro: "Each byte receives the latest finished patch's output, added to its own encoder vector. Four more cheap layers then refine every byte. This replaces Olmo's output layer, which assumed tokens.", io: () => [`${S.k} patch vectors`, `${S.n} byte vectors`] },
+  { nm: "Next byte out", stages: [8], what: "Picks the next byte, and whether a patch ends", stat: () => `512 choices per step`,
+    intro: "Olmo chose among about 100k tokens. Bolmo chooses among 512: each of the 256 byte values, either alone or followed by a patch boundary. That is how Bolmo decides where patches end while it writes.", io: () => [`${S.n} byte vectors`, `next byte + boundary?`] },
+];
+const compOf = (si) => COMPS.findIndex((c) => c.stages.includes(si));
+const visible = () => (full ? STAGES.map((_, i) => i) : [...new Set([0, ...COMPS[comp].stages])]);
+function renderOverview() {
+  const toks = S.toks.slice(0, 4).map((t) => `<span class="tok">${esc(show(S.bytes.slice(t.s, t.e)))}</span>`).join("") + (S.k > 4 ? "…" : "");
+  const pat = S.toks.slice(0, 4).map((t, j) => `<span class="tok" style="box-shadow:inset 0 -3px 0 ${PC(j + 1)}">${esc(show(S.bytes.slice(t.s, t.e)))}</span>`).join("") + (S.k > 4 ? "…" : "");
+  const hexs = Array.from(S.bytes.slice(0, 6), (b) => `<span class="hx">${hex(b)}</span>`).join("") + (S.n > 6 ? "…" : "");
+  const olmo = [
+    ["Tokenizer + token table", "Splits text into pieces from a ~100k vocabulary, one vector each", `${S.k} tokens`, toks, "o1"],
+    ["Transformer", "Most of the 7.3B parameters", `runs ${S.k + 1} steps`, "", "o2"],
+    ["Output layer", "Scores ~100k possible next tokens", "~100k choices per step", "", "o3"],
+  ];
+  const prev = [hexs, "", pat, "", "", `<span class="hx">0–255</span><span class="hx b">+&lt;b&gt;</span>`];
+  const exp = comp !== null || full, f = $("flow");
+  f.classList.toggle("exp", exp); f.classList.toggle("full", full);
+  f.style.setProperty("--cols", COMPS.map((_, i) => (i === comp && !full ? "minmax(0,1fr)" : "46px")).join(" "));
+  const sx = $("stack") ? $("stack").scrollLeft : 0;
+  f.innerHTML =
+    `<div class="frow-l">Olmo 3 7B<span>reads tokens</span></div>` +
+    olmo.map(([nm, w, st, pv, area]) => `<div class="fblk olmo ${area === "o2" ? "kept" : ""}" style="grid-area:${area}"><b>${nm}</b><span class="w">${w}</span><span class="st num">${st}</span>${pv ? `<span class="pv">${pv}</span>` : ""}</div>`).join("") +
+    `<div class="fmid" style="grid-area:m1">replaced by three small byte-level parts</div><div class="fmid keep" style="grid-area:m2">kept</div><div class="fmid" style="grid-area:m3">replaced by two small byte-level parts</div>` +
+    `<div class="frow-l bl">Bolmo 7B<span>reads bytes</span></div>` +
+    COMPS.map((c, i) => comp === i && !full ? expanded(`b${i}`, c.kept)
+      : `<button type="button" class="fblk bol ${c.kept ? "kept" : "new"}" style="grid-area:b${i}" data-open="${i}" title="${exp ? "Expand " + c.nm : ""}"><b>${c.nm}</b><span class="w">${c.what}</span><span class="st num">${c.stat()}</span>${prev[i] ? `<span class="pv">${prev[i]}</span>` : ""}<span class="zoomi" aria-hidden="true">Expand →</span></button>`).join("") +
+    (full ? expanded("fx", false) : "");
+  if (exp) { renderStack(); $("stack").scrollLeft = sx; }
+}
+// the expanded part: header, the part's rows of bytes, and the step notes beside them
+function expanded(area, kept) {
+  return `<div class="fexp ${kept ? "kept" : "new"}" style="grid-area:${area}">
+    <div class="fx-top"><nav class="crumbs" id="crumbs" aria-label="Zoom level"></nav>${full ? '<button class="btn sm" type="button" data-open="0">One part at a time</button>' : ""}<button class="iconbtn" type="button" data-close="1" aria-label="Collapse" title="Collapse (Esc)">×</button></div>
+    <div class="zhead" id="zhead"></div>
+    <div class="explorer">
+      <div class="stackwrap">
+        <div class="stack" id="stack"></div>
+        <div class="selbar" id="selbar" aria-live="polite"></div>
+        <div class="legend">
+          <span><i class="sw" style="background:var(--bound)"></i>patch boundary &lt;b&gt;</span>
+          <span><i class="sw" style="background:var(--sel)"></i>selected byte, and what it can see</span>
+          <span><i class="sw" style="background:var(--p1)"></i><i class="sw" style="background:var(--p2)"></i><i class="sw" style="background:var(--p3)"></i>patches</span>
+        </div>
+      </div>
+      <aside class="panel" id="panel" aria-live="polite"></aside>
+    </div>
+  </div>`;
+}
+function renderContext() {
+  const chars = [...S.text];
+  $("lc").textContent = S.text; $("lcN").textContent = chars.length;
+  $("lt").innerHTML = S.toks.map((t) => `<span class="t">${esc(show(S.bytes.slice(t.s, t.e)))}</span>`).join(""); $("ltN").textContent = S.k;
+  $("lb").innerHTML = Array.from(S.bytes, (b, i) => `<span class="hx${S.bnd[i + 1] ? " end" : ""}">${hex(b)}</span>`).join(""); $("lbN").textContent = S.n;
+  // the longest token that contains letters makes the point
+  let best = null;
+  for (const t of S.toks) { const str = dec.decode(S.bytes.slice(t.s, t.e)); if (/\p{L}{2}/u.test(str) && (!best || t.e - t.s > best.e - best.s)) best = t; }
+  if (!best) { $("insight").textContent = ""; return; }
+  const bs = S.bytes.slice(best.s, best.e), str = show(bs);
+  $("insight").innerHTML = `Olmo gets <span class="tok">${esc(str)}</span> as a single number, <b class="num">#${best.rank.toLocaleString()}</b>. The letters inside are not visible to it. Bolmo gets the ${bs.length} bytes <span class="mono">${Array.from(bs, hex).join(" ")}</span>, one per step.`;
+}
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+function frame(el) { // bring an element to the top of the screen, under the sticky text bar
+  const bar = getComputedStyle($("txt").closest(".inbar")).position === "sticky" ? $("txt").closest(".inbar").offsetHeight : 0;
+  scrollTo({ top: el.getBoundingClientRect().top + scrollY - bar - 12, behavior: reduced ? "auto" : "smooth" });
+}
+function openComp(i, isFull) {
+  const was = comp !== null || full;
+  full = !!isFull; comp = full ? null : i;
+  if (!full) stage = COMPS[i].stages[COMPS[i].stages.length > 1 && i === 0 ? 1 : 0];
+  renderOverview();
+  const sc = $("stack"), el = sc.querySelector(".c.sel");
+  if (el) sc.scrollLeft = Math.max(0, el.offsetLeft - sc.clientWidth / 2);
+  frame(full || matchMedia("(max-width:860px)").matches ? document.querySelector(".fexp") : $("flow"));
+}
+function closeZoom() {
+  const i = comp; comp = null; full = false; renderOverview();
+  const b = i !== null ? document.querySelector(`.fblk.bol[data-open="${i}"]`) : null; if (b) b.focus({ preventScroll: true });
+}
+function renderCrumbs() {
+  const parts = [`<button type="button" class="crumb" data-close="1">Overview</button>`];
+  if (full) parts.push(`<span class="crumb on">All nine steps</span>`);
+  else if (comp !== null) parts.push(`<button type="button" class="crumb" data-open="${comp}">${COMPS[comp].nm}</button>`);
+  if (comp !== null || full) { parts.push(`<span class="crumb">${STAGES[stage].nm}</span>`); parts.push(`<span class="crumb on">${sel === 0 ? "&lt;s&gt;" : "byte " + (sel - 1) + " <code>" + esc(glyph(S, sel - 1).g) + "</code>"}</span>`); }
+  $("crumbs").innerHTML = parts.join('<span class="sep" aria-hidden="true">›</span>');
+  if (comp !== null) {
+    const c = COMPS[comp], [a, b] = c.io();
+    $("zhead").innerHTML = `<div><span class="label">${c.kept ? "Carried over from Olmo 3" : "New in Bolmo"} · part ${comp + 1} of 6</span><h3>${c.nm}</h3><p>${c.intro}</p></div>
+      <div class="zside"><div class="io"><span class="num">${a}</span><i aria-hidden="true">→</i><span class="num">${b}</span></div>
+      <div class="navbtns"><button class="btn sm" type="button" data-open="${comp - 1}" ${comp === 0 ? "disabled" : ""}>← ${comp ? COMPS[comp - 1].nm : "Previous"}</button><button class="btn sm" type="button" data-open="${comp + 1}" ${comp === 5 ? "disabled" : ""}>${comp < 5 ? COMPS[comp + 1].nm : "Next"} →</button><button class="btn sm" type="button" data-full="1">All nine steps</button></div></div>`;
+  } else if (full) $("zhead").innerHTML = `<div><span class="label">Deepest view</span><h3>All nine steps, byte by byte</h3><p>Every step of Bolmo on your text, as in the paper's Fig. 1a. The small byte-level parts run once per byte. The transformer runs once per patch.</p></div><div class="zside"><div class="navbtns"><button class="btn sm" type="button" data-open="0">One part at a time</button></div></div>`;
+}
+document.addEventListener("click", (e) => {
+  const o = e.target.closest("[data-open]"); if (o && !o.disabled) { const i = +o.dataset.open; if (i >= 0 && i < COMPS.length) openComp(i); return; }
+  if (e.target.closest("[data-full]")) { openComp(0, true); return; }
+  if (e.target.closest("[data-close]")) closeZoom();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && (comp !== null || full)) closeZoom(); });
+function cell(cls, c, inner, extra = "") {
+  return `<div class="c ${cls}${c === sel ? " sel" : ""}" data-c="${c}" ${extra}>${inner}</div>`;
+}
+function renderStack() {
+  if (comp === null && !full) return;
+  const vis = visible();
+  const rows = STAGES.map((st, si) => {
+    if (!vis.includes(si)) return "";
+    let cells = "";
+    for (let c = 0; c < S.N; c++) {
+      const i = c - 1; // byte index
+      const past = c <= sel;
+      switch (st.id) {
+        case "x": {
+          if (c === 0) { cells += cell("byte bos", c, `<span class="g">&lt;s&gt;</span><span class="h">BOS</span>`); break; }
+          const g = glyph(S, i);
+          cells += cell("byte", c, `<span class="g${g.ws ? " ws" : ""}">${esc(g.g)}</span><span class="h">${hex(S.bytes[i])}</span>`, `title="byte ${i}: 0x${hex(S.bytes[i])}"`);
+          break;
+        }
+        case "e": {
+          const s = c === 0 ? null : S.suf[i];
+          const h = s ? 6 + Math.min(s.L, 9) * 3.6 : 4;
+          cells += cell("suf", c, `<i style="height:${h}px"></i>`, s ? `title="adds the embedding of '${esc(show(s.b))}'"` : "");
+          break;
+        }
+        case "enc": case "decd":
+          cells += cell("vec", c, `<i class="${past ? "ctx" : ""}"></i>`); break;
+        case "b": {
+          const isIn = c === sel || c === sel + 1;
+          cells += cell(`bnd ${S.bnd[c] ? "yes" : "no"}${isIn ? " in" : ""}`, c, `<i></i>`);
+          break;
+        }
+        case "pool": {
+          const j = S.patchOf[c];
+          const bar = `<span class="bar" style="background:${PC(j)};opacity:.35;${S.bnd[c] ? "right:50%;" : ""}${c > 0 && S.bnd[c - 1] ? "left:50%;" : ""}"></span>`;
+          cells += cell("pat", c, bar + (S.bnd[c] ? `<span class="dot" style="background:${PC(j)}"></span>` : ""));
+          break;
+        }
+        case "glob": {
+          if (!S.bnd[c]) { cells += cell("glob", c, ""); break; }
+          const j = S.patchOf[c], r = S.recv[sel];
+          const cls = j === r ? " recv" : j > r ? " att" : "";
+          cells += cell("glob" + cls, c, `<span class="dot" style="background:${PC(j)}"></span>`);
+          break;
+        }
+        case "dep": {
+          const r = S.recv[c];
+          cells += cell("dep", c, r < 0 ? `<i class="none"></i>` : `<i style="background:${PC(r)}"></i>`);
+          break;
+        }
+        case "head": {
+          if (c === S.N - 1) { cells += cell("out", c, `<span class="g">?</span><span class="f">next</span>`); break; }
+          const nb = S.bytes[c], fused = S.bnd[c + 1];
+          const g = glyph(S, c);
+          cells += cell(`out${fused ? " fused" : ""}`, c, `<span class="g">${esc(g.g)}</span><span class="f">${fused ? 256 + nb : nb}</span>`, `title="predicts ${fused ? "byte + boundary" : "byte"} → index ${fused ? 256 + nb : nb}"`);
+          break;
+        }
+      }
+    }
+    const band = st.id === "glob" ? `<div class="band" aria-hidden="true"><span>Transformer · runs ${S.k + 1}× (once per patch, plus &lt;s&gt;)</span></div>` : "";
+    return `<div class="row${si === stage ? " on" : ""}" data-s="${si}">
+      <button class="rowhead" type="button" data-s="${si}"><span class="ix">${si + 1}</span><span class="nm">${st.nm}</span><span class="sh">${st.sh}</span></button>
+      ${band}<div class="cells" style="position:relative">${cells}</div></div>`;
+  }).join("");
+  const sc = $("stack"); const x = sc.scrollLeft; sc.innerHTML = `<div class="stackin">${rows}</div>`; sc.scrollLeft = x;
+  renderPanel(); renderCrumbs();
+}
+function byteDesc(c) {
+  if (c === 0) return "the start symbol &lt;s&gt;";
+  const g = glyph(S, c - 1);
+  return `byte ${c - 1}, <code>${esc(g.g)}</code> (0x${hex(S.bytes[c - 1])})`;
+}
+function patchText(j) {
+  if (j === 0) return "&lt;s&gt;";
+  const t = S.toks[j - 1]; return `<span class="tok">${esc(show(S.bytes.slice(t.s, t.e)))}</span>`;
+}
+function renderPanel() {
+  const st = STAGES[stage], c = sel, i = c - 1, d = "4,096";
+  let title = st.nm, f = "", body = "", kv = [], here = "";
+  switch (st.id) {
+    case "x":
+      f = `x = UTF-8("${esc(S.text.length > 26 ? S.text.slice(0, 24) + "…" : S.text)}")`;
+      body = "No tokenizer and no vocabulary file. The input is the UTF-8 encoding of the text: one integer from 0 to 255 per byte. ASCII characters take one byte each. Letters such as ö take two, and emoji take four.";
+      kv = [["n", S.n + " bytes"], ["characters", [...S.text].length], ["subword tokens", S.k]];
+      here = c === 0 ? "Every sequence starts with &lt;s&gt;." : `${byteDesc(c)}${S.lead[i] ? "" : ", a continuation byte of a multi-byte character"}.`;
+      break;
+    case "e": {
+      const s = c > 0 ? S.suf[i] : null;
+      f = "e<sub>i</sub> = 𝒯<sub>Byte</sub>(x<sub>i</sub>) + 𝒯<sub>SubwordSuffix</sub>(x<sub>:i</sub>)";
+      body = "Each byte gets an embedding from a 256-row table. Bolmo adds a second one: the embedding, from the original subword model's table, of the longest subword token that ends at this byte. That keeps the subword model's knowledge cheaply, because these extra parameters are a lookup, not compute. The bars show how long that suffix token is.";
+      kv = [["byte table", "256 × d"], ["suffix table", "reused from Olmo 3"], ["d", d]];
+      here = s ? `At ${byteDesc(c)}, the longest token ending here is <span class="tok">${esc(show(s.b))}</span> (rank ${s.r.toLocaleString()}, ${s.L} byte${s.L > 1 ? "s" : ""}).` : "&lt;s&gt; has its own embedding.";
+      break;
+    }
+    case "enc":
+      f = "ê = ℰ(e)   ·   1 × (mLSTM + SwiGLU FFN)";
+      body = "A single shallow but wide layer mixes each byte with the bytes before it. The paper uses mLSTM, a linear recurrent layer from xLSTM, because it decoded faster than Mamba2 or Gated DeltaNet at similar accuracy. One layer is enough because the suffix embeddings already carry a lot.";
+      kv = [["layers", "1"], ["mLSTM heads", "16"], ["width d", d], ["direction", "causal"]];
+      here = `ê at ${byteDesc(c)} has seen ${c + 1} positions: everything up to and including itself (shaded).`;
+      break;
+    case "b": {
+      f = "p<sub>t</sub> = ½ (1 − cos(W<sub>q</sub> ê<sub>t+1</sub>, W<sub>k</sub> ê<sub>t</sub>))";
+      body = "The boundary predictor compares byte t with the byte after it. If they look unlike each other, a patch ends at t. Earlier models such as H-Net compare t with t−1, so they only see the past. Looking one byte ahead lets Bolmo reproduce subword boundaries. It is trained to match them with binary cross-entropy and gets above 99% right.";
+      kv = [["inputs", "ê<sub>t</sub>, ê<sub>t+1</sub>"], ["used during", "prefill"], ["accuracy", "> 99%"]];
+      const nx = c + 1 < S.N ? byteDesc(c + 1) : "nothing yet (end of text)";
+      here = `At ${byteDesc(c)}: ${S.bnd[c] ? '<b class="b">a boundary</b>, so a patch ends here' : "no boundary"}. The decision also reads ${nx}.`;
+      break;
+    }
+    case "pool": {
+      const j = S.patchOf[c];
+      f = "h<sub>j</sub> = ê<sub>last byte of patch j</sub>";
+      body = "Pooling keeps one vector per patch: the encoder output at the patch's last byte, which has already seen the whole patch. It has no parameters, and the global model uses the same width d, so no projection is needed.";
+      kv = [["patches k", S.k], ["bytes per patch", (S.n / Math.max(1, S.k)).toFixed(2)], ["sequence", `${S.n} → ${S.k}`]];
+      here = `${byteDesc(c)} belongs to patch ${j}: ${patchText(j)}.`;
+      break;
+    }
+    case "glob": {
+      const r = S.recv[c];
+      f = "ĥ = ℳ(h)   ·   all transformer layers of Olmo 3 7B";
+      body = "This is where almost all the compute is. The global model is the original subword model's transformer, layers and weights kept. It runs over patches, not bytes, so its sequence is as short as the subword model's. Each patch attends to itself and earlier patches.";
+      kv = [["runs", `${S.k + 1}× here, not ${S.n + 1}×`], ["parameters", "≈ 7.3B of Bolmo's 7.63B"], ["width d", d]];
+      here = r >= 0 ? `${byteDesc(c)} will receive the output of patch ${r} (${patchText(r)}, ringed). Patches after it are faded because they are not finished yet.` : "Nothing has finished yet.";
+      break;
+    }
+    case "dep": {
+      const r = S.recv[c];
+      f = "z<sub>t</sub> = ĥ<sub>latest patch ending ≤ t</sub> + Linear(ê<sub>t</sub>)";
+      body = "Depooling sends the patch vectors back to the bytes. Each byte receives the newest patch output that is already available, and its own encoder state is added back as a residual. The colours show which patch each byte receives.";
+      kv = [["new params", "one d × d linear"], ["output", `${S.n + 1} × d`]];
+      here = r >= 0 ? `${byteDesc(c)} receives patch ${r}: ${patchText(r)}.` : "&lt;s&gt; is the first position, so there is no earlier patch output.";
+      break;
+    }
+    case "decd":
+      f = "ẑ = 𝒟(z)   ·   4 × (mLSTM + SwiGLU FFN)";
+      body = "Four more causal layers turn each byte's mix of patch context and local detail into a prediction state. The decoder is deeper than the encoder because it has to replace the subword model's output embedding matrix. That matrix could not be reused, as the encoder's embeddings were.";
+      kv = [["layers", "4"], ["FFN width", "5,504"], ["direction", "causal"]];
+      here = `ẑ at ${byteDesc(c)} has seen positions 0 to ${c}.`;
+      break;
+    case "head": {
+      f = "y = softmax(W ẑ)   ·   |V| = 256 bytes + 256 bytes-with-&lt;b&gt;";
+      body = "The head predicts the next byte and, in the same softmax, whether a patch ends after it. During generation that is how Bolmo decides when to call the global model. It needs no lookahead, because the next byte has not been written yet.";
+      kv = [["outputs", "512 per position"], ["fused entries", "256–511"]];
+      if (c === S.N - 1) here = "This is the last position. Its prediction is the first byte the model would write next.";
+      else { const nb = S.bytes[c], fu = S.bnd[c + 1]; here = `At ${byteDesc(c)} the training target is <code>${esc(glyph(S, c).g)}</code>${fu ? ' <b class="b">followed by a boundary</b>' : ""}, entry ${fu ? 256 + nb : nb} of 512.`; }
+      break;
+    }
+  }
+  $("selbar").innerHTML = `<b>Selected:</b> ${here}`;
+  $("panel").innerHTML = `<span class="label">Step ${stage + 1} of 9</span><h3>${title}</h3>
+    <div class="formula">${f}</div><p>${body}</p>
+    <dl class="kv">${kv.map(([a, b]) => `<dt>${a}</dt><dd>${b}</dd>`).join("")}</dl>
+    <div class="navbtns"><button class="btn" type="button" data-nav="-1" ${stage === 0 ? "disabled" : ""}>Previous step</button><button class="btn primary" type="button" data-nav="1" ${stage === 8 ? "disabled" : ""}>Next step</button></div>`;
+}
+$("flow").addEventListener("click", (e) => {
+  if (!e.target.closest("#stack")) return;
+  const h = e.target.closest(".rowhead"); if (h) { stage = +h.dataset.s; renderStack(); return; }
+  const c = e.target.closest(".c"); if (!c) return;
+  sel = +c.dataset.c; const r = e.target.closest(".row"); if (r) stage = +r.dataset.s; renderStack();
+});
+$("flow").addEventListener("click", (e) => { const b = e.target.closest("[data-nav]"); if (!b) return; stage = Math.max(0, Math.min(8, stage + +b.dataset.nav)); if (!full) { const c = compOf(stage); if (c !== comp) { comp = c; renderOverview(); return; } } renderStack(); });
+
+/* ---------- peek: how much lookahead reproduces the boundaries ---------- */
+const PAIRS = [["Hello World!", "Hello Wor!"], ["among the flowers", "among the flowerbed"], ["I understand.", "I under."]];
+function renderPairs() {
+  $("pairs").innerHTML = PAIRS.map(([a, b]) => {
+    const A = enc.encode(a), B = enc.encode(b);
+    let L = 0; while (L < A.length && L < B.length && A[L] === B[L]) L++;
+    const ends = (s) => new Set(tokenize(s).map((t) => t.e));
+    const ea = ends(a), eb = ends(b);
+    const row = (s, other) => tokenize(s).map((t) => {
+      const hot = t.e < L && !other.has(t.e);
+      return `<span class="t${hot ? " hot" : ""}">${esc(show(enc.encode(s).slice(t.s, t.e)))}</span>`;
+    }).join("");
+    return `<div class="pair"><div class="toks">${row(a, eb)}</div><div class="toks">${row(b, ea)}</div>
+      <span class="muted" style="font-size:13px">Shared prefix: <code>${esc(show(A.slice(0, L)))}</code></span></div>`;
+  }).join("");
+}
+function renderPeek() {
+  const k = +$("kpeek").value; $("kv").textContent = k;
+  const truth = S.bnd, n = S.n; let hit = 0, tot = 0;
+  const pred = new Uint8Array(n + 1);
+  for (let i = 0; i < n - 1; i++) {
+    let cut = Math.min(n, i + 1 + k);
+    while (cut < n && !S.lead[cut]) cut++; // never cut inside a character
+    const sub = dec.decode(S.bytes.slice(0, cut));
+    const ends = new Set(tokenize(sub).map((t) => t.e));
+    pred[i + 1] = ends.has(i + 1) ? 1 : 0;
+    tot++; if (pred[i + 1] === truth[i + 1]) hit++;
+  }
+  pred[n] = 1;
+  $("agree").textContent = tot ? Math.round((100 * hit) / tot) + "%" : "–";
+  let bytesRow = "", tRow = "", pRow = "";
+  for (let c = 1; c <= n; c++) {
+    const g = glyph(S, c - 1), miss = c < n && pred[c] !== truth[c];
+    bytesRow += `<div class="c byte"><span class="g${g.ws ? " ws" : ""}">${esc(g.g)}</span><span class="h">${hex(S.bytes[c - 1])}</span></div>`;
+    tRow += `<div class="c bnd ${truth[c] ? "yes" : "no"}"><i></i></div>`;
+    pRow += `<div class="c bnd ${pred[c] ? "yes" : "no"}${miss ? " miss" : ""}"><i></i></div>`;
+  }
+  $("peekstrip").innerHTML = `<span class="lbl">Your text</span><div class="cells">${bytesRow}</div>
+    <span class="lbl">Boundaries from the full text</span><div class="cells">${tRow}</div>
+    <span class="lbl">Seeing ${k} byte${k === 1 ? "" : "s"} ahead (red: disagrees)</span><div class="cells">${pRow}</div>`;
+}
+$("kpeek").addEventListener("input", renderPeek);
+
+/* ---------- decoding replay ---------- */
+let dpos = 0, dtimer = null;
+function buildGrid() {
+  let h = ""; for (let r = 0; r < 16; r++) for (let col = 0; col < 32; col++) { const idx = r * 32 + col; h += `<i data-i="${idx}" class="${idx >= 256 ? "fz" : ""}" title="${idx < 256 ? "byte 0x" + hex(idx) : "byte 0x" + hex(idx - 256) + " + boundary"}"></i>`; }
+  $("grid512").innerHTML = h;
+}
+function renderDecode() {
+  const n = S.n; let g = 0;
+  for (let c = 1; c <= dpos; c++) if (S.bnd[c]) g++;
+  let cells = "";
+  for (let c = 1; c <= n; c++) {
+    const gl = glyph(S, c - 1), j = S.patchOf[c];
+    const cls = c > dpos ? " future" : c === dpos ? " now" : "";
+    cells += `<div class="c byte${cls}"><span class="g${gl.ws ? " ws" : ""}">${esc(gl.g)}</span><span class="h">${hex(S.bytes[c - 1])}</span><span class="u" style="background:${PC(j)}"></span></div>`;
+  }
+  $("emit").innerHTML = `<span class="lbl">Bytes written so far, underlined by patch</span><div class="cells">${cells}</div>`;
+  $("cLocal").textContent = dpos;
+  $("cGlobal").textContent = g + 1; // +1: the global model has already read <s>
+  $("cSave").textContent = dpos ? `${dpos - g}` : "–";
+  document.querySelectorAll("#grid512 i.hit").forEach((x) => x.classList.remove("hit"));
+  if (dpos > 0) {
+    const b = S.bytes[dpos - 1], fu = S.bnd[dpos], idx = fu ? 256 + b : b;
+    $("grid512").children[idx].classList.add("hit");
+    const gl = glyph(S, dpos - 1).g;
+    $("declog").innerHTML = `Step ${dpos}: emit entry ${idx}, <code>${esc(gl)}</code>${fu ? ' <b class="b">+ boundary</b>. Patch done, so the global model runs.' : ". The patch continues, so only the local models run."}`;
+  } else $("declog").textContent = "The global model has read <s>. Press Play or Step.";
+  $("play").textContent = dtimer ? "Pause" : dpos >= n ? "Replay" : "Play";
+}
+function stepDecode() { if (dpos < S.n) { dpos++; renderDecode(); } else stopDecode(); }
+function stopDecode() { clearInterval(dtimer); dtimer = null; renderDecode(); }
+$("step").addEventListener("click", () => { stopDecode(); stepDecode(); });
+$("reset").addEventListener("click", () => { stopDecode(); dpos = 0; renderDecode(); });
+$("play").addEventListener("click", () => {
+  if (dtimer) return stopDecode();
+  if (dpos >= S.n) dpos = 0;
+  dtimer = setInterval(() => { if (dpos >= S.n) stopDecode(); else stepDecode(); }, 380);
+  renderDecode();
+});
+
+/* ---------- training stages ---------- */
+let tstage = 1;
+function renderTrain() {
+  const one = tstage === 1;
+  $("st1").setAttribute("aria-pressed", one); $("st2").setAttribute("aria-pressed", !one);
+  const blk = (nm, frz, big, extra = "") => `<div class="blk${frz ? " frz" : ""}${big ? " big" : ""}"><span>${nm}${extra}</span><span class="st">${frz ? "frozen" : "trained"}</span></div>`;
+  $("arch").innerHTML = [
+    blk("LM head (512 outputs)", false), blk("Local decoder 𝒟 · 4 mLSTM layers", false),
+    blk("Global model ℳ · Olmo 3 transformer", one, true, one ? " · only the first 4 layers run for ℒ<sub>ℰ</sub>" : ""),
+    blk("Boundary predictor ℬ", false), blk("Local encoder ℰ · 1 mLSTM layer", false), blk("Byte + subword-suffix embeddings", false),
+  ].join("");
+  const L = [
+    ["ℒ<sub>ℬ</sub>", "λ = 4", "Binary cross-entropy between predicted boundaries and the subword tokenizer's boundaries.", true],
+    ["ℒ<sub>ℰ</sub>", "λ = 1", "Pool the encoder's outputs at the true subword boundaries, run them through the first 4 frozen global layers, and match (L2) what Olmo's own token embeddings give after the same 4 layers.", one],
+    ["ℒ<sub>𝒟,Distill</sub>", "λ = 1", "Make each patch's likelihood, the product of its byte probabilities, equal Olmo's probability for that subword token. The paper proves this objective is exact. Uses a temperature-modulated BCE with τ = 5.", one],
+    ["ℒ<sub>CE</sub>", "λ = 1", "Ordinary next-byte cross-entropy on the data, so the model starts to use information below the subword level.", true],
+  ];
+  $("losses").innerHTML = L.map(([n, l, d, on]) => `<div class="loss${on ? "" : " off"}"><b>${n}</b><span class="lam">${l}${on ? "" : " · off in this stage"}</span><span></span><span style="font-size:14px">${d}</span></div>`).join("");
+  $("stagenote").innerHTML = one
+    ? "Stage 1 never backpropagates through the full global model, so a step is cheap: about 2× the global model's forward cost, against 3× for an end-to-end step. Skipping stage 1 and spending the same compute on stage 2 left bits per byte about 1–4% worse throughout training (Fig. 4)."
+    : "Stage 2 unfreezes everything. The global model now sees byte-level information and adapts to it. In stage 2 the target bytes per patch can also be raised by merging boundaries, which is the next section.";
+}
+$("st1").addEventListener("click", () => { tstage = 1; renderTrain(); });
+$("st2").addEventListener("click", () => { tstage = 2; renderTrain(); });
+
+/* ---------- compression ---------- */
+function mergePatches(target) {
+  let P = S.toks.map((t) => [t.s, t.e]);
+  const key = (p) => show(S.bytes.slice(p[0], p[1]));
+  while (P.length > 1 && S.n / P.length < target) {
+    const cnt = new Map();
+    for (let i = 0; i < P.length - 1; i++) { const k2 = key(P[i]) + "\u0000" + key(P[i + 1]); cnt.set(k2, (cnt.get(k2) || 0) + 1); }
+    let best = null, bc = -1, bl = Infinity;
+    for (let i = 0; i < P.length - 1; i++) {
+      const k2 = key(P[i]) + "\u0000" + key(P[i + 1]), c = cnt.get(k2), l = P[i + 1][1] - P[i][0];
+      if (c > bc || (c === bc && l < bl)) { best = k2; bc = c; bl = l; }
+    }
+    const Q = [];
+    for (let i = 0; i < P.length; i++) {
+      if (i < P.length - 1 && key(P[i]) + "\u0000" + key(P[i + 1]) === best) { Q.push([P[i][0], P[i + 1][1]]); i++; }
+      else Q.push(P[i]);
+    }
+    P = Q;
+  }
+  return P;
+}
+function renderCmp() {
+  const t = +$("cmp").value; $("cmpv").textContent = t.toFixed(1);
+  const P = mergePatches(t);
+  let cells = "";
+  P.forEach((p, j) => {
+    for (let i = p[0]; i < p[1]; i++) {
+      const g = glyph(S, i), last = i === p[1] - 1;
+      cells += `<div class="c byte"><span class="g${g.ws ? " ws" : ""}">${esc(g.g)}</span><span class="h">${hex(S.bytes[i])}</span><span class="u" style="position:absolute;left:${i === p[0] ? 3 : 0}px;right:${last ? 3 : 0}px;bottom:2px;height:4px;border-radius:2px;background:${PC(j + 1)}"></span>${last ? '<span style="position:absolute;right:-1px;top:4px;bottom:4px;width:2px;border-radius:1px;background:var(--bound)"></span>' : ""}</div>`;
+    }
+  });
+  $("cmpstrip").innerHTML = `<span class="lbl">Patches after merging</span><div class="cells">${cells}</div>`;
+  const c = S.n / P.length;
+  $("cmpstat").innerHTML = `<span class="num">${P.length}</span> patches · <span class="num">${c.toFixed(2)}</span> bytes per patch · global model runs <span class="num">${Math.round((100 * P.length) / S.k)}%</span> as often as with subword boundaries`;
+}
+$("cmp").addEventListener("input", renderCmp);
+
+/* ---------- charts ---------- */
+const SVGNS = (tag, a, txt) => `<${tag} ${Object.entries(a).map(([k, v]) => `${k}="${v}"`).join(" ")}>${txt ?? ""}</${tag}>`;
+function fig2() {
+  const W = 520, H = 330, m = { l: 44, r: 14, t: 14, b: 40 };
+  const X = (v) => m.l + ((v - 0.55) / (1.2 - 0.55)) * (W - m.l - m.r), Y = (v) => H - m.b - ((v - 42) / (64 - 42)) * (H - m.t - m.b);
+  const ser = [
+    { nm: "SuperBPE tokenizer transfer", col: "var(--ink-2)", mk: "sq", pts: [[1.077, 58.9, "OLMo 2 1B"], [0.738, 55.6, "200k, c=6.2"], [0.79, 54.4, "400k, c=6.6"]] },
+    { nm: "Bolmo + BPE merges", col: "var(--p2)", mk: "ci", pts: [[1.15, 61.4, "Bolmo 1B"], [0.787, 56.8, "t=8, c=6.2"], [0.672, 52.9, "t=16, c=7.2"]] },
+    { nm: "Bolmo + entropy merges", col: "var(--p3)", mk: "tr", pts: [[1.15, 61.4], [0.683, 48.1, "t=8, c=7.0"], [0.573, 44.4, "t=16, c=8.5"]] },
+    { nm: "Bolmo + cross-entropy merges", col: "var(--p4)", mk: "di", pts: [[1.15, 61.4], [0.722, 50.3, "t=8, c=6.7"], [0.587, 44.9, "t=16, c=8.3"]] },
+  ];
+  let s = "";
+  for (let v = 44; v <= 64; v += 4) s += SVGNS("line", { class: "gl", x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v) }) + SVGNS("text", { x: m.l - 6, y: Y(v) + 4, "text-anchor": "end" }, v);
+  for (let v = 0.6; v <= 1.2001; v += 0.1) s += SVGNS("text", { x: X(v), y: H - m.b + 16, "text-anchor": "middle" }, v.toFixed(1));
+  s += SVGNS("text", { class: "lab", x: (W + m.l) / 2, y: H - 6, "text-anchor": "middle" }, "GFLOPs per byte (lower is cheaper)");
+  s += SVGNS("text", { class: "lab", x: 12, y: H / 2, transform: `rotate(-90 12 ${H / 2})`, "text-anchor": "middle" }, "Core tasks (%)");
+  const mark = (t, x, y, col) => t === "sq" ? SVGNS("rect", { x: x - 5, y: y - 5, width: 10, height: 10, fill: col })
+    : t === "tr" ? SVGNS("path", { d: `M${x} ${y - 6}L${x + 6} ${y + 5}L${x - 6} ${y + 5}Z`, fill: col })
+    : t === "di" ? SVGNS("path", { d: `M${x} ${y - 6}L${x + 6} ${y}L${x} ${y + 6}L${x - 6} ${y}Z`, fill: col })
+    : SVGNS("circle", { cx: x, cy: y, r: 5, fill: col });
+  ser.forEach((sr) => {
+    s += SVGNS("polyline", { points: sr.pts.map((p) => `${X(p[0])},${Y(p[1])}`).join(" "), fill: "none", stroke: sr.col, "stroke-width": 1.6 });
+    sr.pts.forEach((p) => {
+      s += mark(sr.mk, X(p[0]), Y(p[1]), sr.col);
+      if (p[2]) { const right = p[0] > 1.0; s += SVGNS("text", { x: X(p[0]) + (right ? -8 : 8), y: Y(p[1]) - 8, "text-anchor": right ? "end" : "start" }, p[2]); }
+    });
+  });
+  $("fig2").innerHTML = s;
+  $("fig2keys").innerHTML = ser.map((x) => `<span><i class="sw" style="background:${x.col}"></i>${x.nm}</span>`).join("");
+}
+function fig3() {
+  const W = 520, H = 250, m = { l: 150, r: 46, t: 8, b: 30 };
+  const rows = [["Olmo 3 7B · 4.4 bytes/token", 151, "var(--ink-2)"], ["Bolmo 7B · c = 4.4", 115, "var(--p2)"], ["Bolmo 7B · c = 6.6", 156, "var(--p2)"], ["Bolmo 7B · c = 8.8", 187, "var(--p2)"]];
+  const X = (v) => m.l + (v / 200) * (W - m.l - m.r), bh = 30, gap = (H - m.t - m.b - rows.length * bh) / (rows.length - 1);
+  let s = "";
+  for (let v = 0; v <= 200; v += 50) s += SVGNS("line", { class: "gl", x1: X(v), x2: X(v), y1: m.t, y2: H - m.b }) + SVGNS("text", { x: X(v), y: H - m.b + 16, "text-anchor": "middle" }, v);
+  rows.forEach(([nm, v, col], i) => {
+    const y = m.t + i * (bh + gap);
+    s += SVGNS("rect", { x: X(0), y, width: X(v) - X(0), height: bh, rx: 3, fill: col });
+    s += SVGNS("text", { class: "lab", x: m.l - 8, y: y + bh / 2 + 4, "text-anchor": "end" }, nm);
+    s += SVGNS("text", { class: "lab", x: X(v) + 6, y: y + bh / 2 + 4 }, "≈" + v);
+  });
+  s += SVGNS("text", { x: (m.l + W - m.r) / 2, y: H - 4, "text-anchor": "middle" }, "bytes per second");
+  $("fig3").innerHTML = s;
+}
+// Table 1, scores in %
+const CATS = ["Suite average", "Char", "CUTE", "Code pass@1", "Code pass@16", "Math", "MC STEM", "MC non-STEM", "GenQA"];
+const FAMS = {
+  olmo: { src: ["Olmo 3 7B", [62.3, 54.3, 54.7, 31.1, 49.7, 55.3, 66.3, 77.7, 72.4]], byt: ["Bolmo 7B", [62.5, 78.1, 80.9, 27.6, 56.4, 48.9, 65.5, 75.8, 70.9]], ct: ["Olmo 3 7B (CT)", [61.9, 70.7, 74.6, 29.4, 47.8, 49.8, 66.1, 76.6, 71.7]] },
+  qwen: { src: ["Qwen3 8B", [70.3, 66.2, 66.9, 45.8, 60.7, 68.2, 78.9, 84.8, 71.0]], byt: ["Bwen 8B", [69.8, 78.9, 87.2, 39.6, 69.0, 60.2, 77.0, 83.0, 70.5]] },
+  llama: { src: ["Llama 3 8B", [60.7, 57.2, 58.3, 29.1, 46.6, 35.8, 69.0, 75.4, 73.5]], byt: ["Blama 8B", [59.8, 81.0, 87.9, 23.7, 52.0, 30.4, 64.6, 73.1, 71.0]] },
+};
+const BASE = [["BLT 7B", [48.9, 46.4, 48.0, 24.5, 40.2, 15.7, 49.0, 56.6, 68.4]], ["EvaByte 6.5B", [45.7, 43.2, 47.7, 23.2, 40.8, 27.0, 54.0, 63.8, 41.4]], ["TFree-HAT 7B", [56.5, 49.3, 54.5, 28.4, 47.0, 35.8, 62.1, 66.5, 71.3]]];
+let fam = "olmo";
+function resChart() {
+  const F = FAMS[fam], W = 760, H = 420, m = { l: 112, r: 20, t: 10, b: 34 }, rh = (H - m.t - m.b) / CATS.length;
+  const X = (v) => m.l + (v / 100) * (W - m.l - m.r);
+  const series = [[F.src[0], F.src[1], "var(--ink-3)", "src"], [F.byt[0], F.byt[1], "var(--bound)", "byt"]];
+  if (F.ct) series.push([F.ct[0], F.ct[1], "var(--p3)", "ct"]);
+  const bl = $("showbl").checked;
+  let s = "";
+  for (let v = 0; v <= 100; v += 20) s += SVGNS("line", { class: "gl", x1: X(v), x2: X(v), y1: m.t, y2: H - m.b }) + SVGNS("text", { x: X(v), y: H - m.b + 16, "text-anchor": "middle" }, v);
+  CATS.forEach((cname, i) => {
+    const y = m.t + rh * i + rh / 2;
+    s += SVGNS("text", { class: "lab", x: m.l - 10, y: y + 4, "text-anchor": "end", "font-weight": i === 1 || i === 2 ? 600 : 400 }, cname);
+    s += SVGNS("line", { class: "ax", x1: X(Math.min(F.src[1][i], F.byt[1][i])), x2: X(Math.max(F.src[1][i], F.byt[1][i])), y1: y, y2: y, "stroke-width": 3 });
+    if (bl) BASE.forEach(([nm, v], b) => { s += SVGNS("circle", { cx: X(v[i]), cy: y, r: 4.5, fill: "var(--surface)", stroke: "var(--ink-3)", "stroke-width": 1.4 }, `<title>${nm}: ${v[i]}</title>`); });
+    series.forEach(([nm, v, col, kind]) => {
+      if (kind === "ct") s += SVGNS("rect", { x: X(v[i]) - 4, y: y - 4, width: 8, height: 8, fill: col, transform: `rotate(45 ${X(v[i])} ${y})` }, `<title>${nm}: ${v[i]}</title>`);
+      else s += SVGNS("circle", { cx: X(v[i]), cy: y, r: kind === "byt" ? 7 : 6, fill: col }, `<title>${nm}: ${v[i]}</title>`);
+    });
+    const d = (F.byt[1][i] - F.src[1][i]);
+    s += SVGNS("text", { x: W - m.r, y: y + 4, "text-anchor": "end", fill: d >= 0 ? "var(--ok)" : "var(--ink-3)", style: `fill:${d >= 0 ? "var(--ok)" : "var(--ink-3)"}` }, (d >= 0 ? "+" : "") + d.toFixed(1));
+  });
+  $("res").innerHTML = s;
+  const keys = series.map(([nm, , col, kind]) => `<span><i class="sw" style="background:${col};${kind === "ct" ? "transform:rotate(45deg)" : "border-radius:50%"}"></i>${nm}</span>`);
+  if (bl) keys.push(`<span><i class="sw" style="border:1.4px solid var(--ink-3);border-radius:50%"></i>BLT 7B · EvaByte 6.5B · TFree-HAT 7B (hover for names)</span>`);
+  keys.push(`<span class="muted">right column: byteified − source</span>`);
+  $("reskeys").innerHTML = keys.join("");
+  $("fam").innerHTML = [["olmo", "Olmo 3 → Bolmo"], ["qwen", "Qwen3 → Bwen"], ["llama", "Llama 3 → Blama"]].map(([k, l]) => `<button type="button" data-f="${k}" aria-pressed="${k === fam}">${l}</button>`).join("");
+}
+$("fam").addEventListener("click", (e) => { const b = e.target.closest("[data-f]"); if (b) { fam = b.dataset.f; resChart(); } });
+$("showbl").addEventListener("change", resChart);
+function ifeChart() {
+  const W = 520, H = 210, m = { l: 160, r: 50, t: 6, b: 26 };
+  const rows = [["Olmo 3 (base)", 35, "var(--ink-3)"], ["Bolmo (base)", 31, "var(--ink-3)"], ["Bolmo + (θIT − θPT)", 67.5, "var(--bound)"], ["Olmo 3, RL post-trained", 67, "var(--p3)"]];
+  const X = (v) => m.l + (v / 80) * (W - m.l - m.r), bh = 28, gap = (H - m.t - m.b - rows.length * bh) / (rows.length - 1);
+  let s = "";
+  for (let v = 0; v <= 80; v += 20) s += SVGNS("line", { class: "gl", x1: X(v), x2: X(v), y1: m.t, y2: H - m.b }) + SVGNS("text", { x: X(v), y: H - m.b + 16, "text-anchor": "middle" }, v);
+  rows.forEach(([nm, v, col], i) => {
+    const y = m.t + i * (bh + gap);
+    s += SVGNS("rect", { x: X(0), y, width: X(v) - X(0), height: bh, rx: 3, fill: col });
+    s += SVGNS("text", { class: "lab", x: m.l - 8, y: y + bh / 2 + 4, "text-anchor": "end" }, nm);
+    s += SVGNS("text", { class: "lab", x: X(v) + 6, y: y + bh / 2 + 4 }, "≈" + v);
+  });
+  $("ife").innerHTML = s;
+}
+
+/* ---------- quiz ---------- */
+const QUIZ = [
+  { q: "“Hello World!” and “Hello Wor!” share the prefix “Hello W”. Why can't a boundary predictor that sees only the past copy the tokenizer here?", o: ["The tokenizer ends a token after “W” in one text and not the other, and the bytes so far are identical", "Byte models cannot represent the letter W", "The global model has not run yet"], a: 0, w: "Up to “W” both texts are the same bytes, but the tokenizer ends a token after “W” only in “Hello Wor!”. The decision depends on what comes next, so Bolmo's predictor reads byte t+1." },
+  { q: "What is frozen during stage 1?", o: ["The local encoder", "The global model, the transformer taken from Olmo 3", "The boundary predictor", "Nothing"], a: 1, w: "Stage 1 trains only the new byte-level parts to reproduce Olmo exactly. The global model stays frozen, so its full backward pass is never needed, which makes the stage cheap." },
+  { q: "Why does Bolmo's output layer have 512 entries rather than 256?", o: ["It also predicts UTF-16 code units", "Each byte appears twice: once alone and once followed by a patch boundary", "It keeps 256 subword tokens from Olmo"], a: 1, w: "Fusing the boundary into the byte lets the model decide when a patch ends while it writes, with no extra decoding positions." },
+  { q: "Bolmo 7B decodes at about 115 bytes/s with 4.4 bytes per patch. What happens at 8.8 bytes per patch?", o: ["It slows down, because patches are longer", "It speeds up to about 187 bytes/s, because the global model runs half as often", "Nothing changes, because speed depends only on the local models"], a: 1, w: "Most of the compute is in the global model, which runs once per patch. Doubling bytes per patch halves its calls. Above about 6.6 bytes per patch Bolmo is faster than Olmo itself." },
+  { q: "How did the authors give Bolmo instruction following without training it on instructions?", o: ["They fine-tuned the local decoder on IFEval", "They added Olmo's post-training weight change (θIT − θPT) to Bolmo's global model", "They distilled from a chat model"], a: 1, w: "Task arithmetic. Bolmo's global model has the same layers as Olmo, so the difference between post-trained and base Olmo can be added directly. IFEval rose by 36 points." },
+];
+function renderQuiz() {
+  $("quizbox").innerHTML = QUIZ.map((q, i) => `<div class="q" data-q="${i}"><h3>${i + 1}. ${esc(q.q)}</h3><div class="opts">${q.o.map((o, j) => `<button class="opt" type="button" data-j="${j}">${esc(o)}</button>`).join("")}</div><div class="why" hidden></div></div>`).join("");
+}
+$("quizbox").addEventListener("click", (e) => {
+  const b = e.target.closest(".opt"); if (!b) return;
+  const box = b.closest(".q"), q = QUIZ[+box.dataset.q], j = +b.dataset.j;
+  box.querySelectorAll(".opt").forEach((x) => x.classList.remove("right", "wrong"));
+  b.classList.add(j === q.a ? "right" : "wrong");
+  const w = box.querySelector(".why"); w.hidden = false;
+  w.textContent = (j === q.a ? "Right. " : "Not quite. ") + q.w;
+});
+
+/* ---------- wiring ---------- */
+function update() {
+  const t = $("txt").value || " ";
+  S = analyse(t);
+  sel = Math.min(sel, S.N - 1);
+  $("sN").textContent = S.n; $("sK").textContent = S.k; $("sC").textContent = (S.n / Math.max(1, S.k)).toFixed(2);
+  document.querySelectorAll("#presets .chip").forEach((c) => c.setAttribute("aria-pressed", PRESETS[+c.dataset.p][1] === t));
+  const cmp = $("cmp"); const base = S.n / Math.max(1, S.k);
+  cmp.min = Math.max(1, Math.floor(base * 2) / 2); if (+cmp.value < +cmp.min) cmp.value = cmp.min;
+  stopDecode(); dpos = 0;
+  renderContext(); renderOverview(); renderStack(); renderPeek(); renderDecode(); renderCmp();
+}
+let deb = null;
+$("txt").addEventListener("input", () => { clearTimeout(deb); deb = setTimeout(update, 120); });
+$("presets").innerHTML = PRESETS.map(([l], i) => `<button class="chip" type="button" data-p="${i}">${l}</button>`).join("");
+$("presets").addEventListener("click", (e) => { const b = e.target.closest(".chip"); if (!b) return; $("txt").value = PRESETS[+b.dataset.p][1]; sel = 1; update(); });
+// the default text opens with " flower" selected; other texts start at their first byte
+
+buildGrid(); renderTrain(); fig2(); fig3(); resChart(); ifeChart(); renderQuiz();
+loadVocab().then(() => {
+  renderPairs(); update();
+}).catch((err) => {
+  $("insight").innerHTML = `<p class="err">The tokenizer could not load in this browser (${esc(String(err))}). It needs DecompressionStream, which current Chrome, Edge, Firefox and Safari 16.4+ provide.</p>`;
+});
+</script>

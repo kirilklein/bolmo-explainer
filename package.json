@@ -1,0 +1,13 @@
+{
+  "name": "bolmo-explainer",
+  "private": true,
+  "type": "module",
+  "description": "An interactive walkthrough of Bolmo: retrofitting language models to operate over bytes (Minixhofer et al., Nature 2026).",
+  "scripts": {
+    "build": "node scripts/build.mjs"
+  },
+  "devDependencies": {
+    "js-tiktoken": "1.0.15"
+  },
+  "license": "MIT"
+}
